@@ -1,0 +1,223 @@
+###############################################################################################################################################
+# Electronic health records (EHR) data can be very complex - example is Epic's EHR flowsheet data
+# This program presents a simple method for converting complex EHR data into a sparse bag of words (BOW) vector to be fed into models
+# For logistic regression, the BOW can be transformed to tf-idf representation
+###############################################################################################################################################
+
+
+import pandas as pd
+import numpy as np
+import random
+import PredictionModels
+
+# Returns dictionaries of different structured data fields
+def get_cols ():
+    '''
+    :return: A dictionary of different groups of variables
+    '''
+
+    dictionary = {
+        "demographic_cols": [
+            'age', 'ADDRESS_ZIP', "GENDER", 'ETHNIC_GROUP', 'LANGUAGE', 'MARITAL_STATUS', 'RELIGION', ],
+
+        "triage_cols": [
+            'ACUITY_LEVEL', 'MEANS_OF_ARRV', 'PAT_ESCORTED_BY', ],
+
+        "NOTE_DATE_cols": [
+            "NOTE_DATE_year", "NOTE_DATE_month", "NOTE_DATE_day", "NOTE_DATE_hour"],
+
+        "vital_signs_cols": [
+            'SBP', 'DBP', 'PULSE', 'RESPIRATIONS', 'TEMPERATURE_TYMPANIC', ],
+
+        "time_dif_cols": [
+            'BP_NOTE_dif', 'PULSE_NOTE_dif', 'RESPIRATIONS_NOTE_dif',
+            'TEMPERATURE_TYMPANIC_NOTE_dif', 'ECG_NOTE_dif', ],
+
+        "background_cols": [
+            'num_prev_ER', 'days_to_prev_ER', 'num_hospitalizations', 'days_to_last_hospitalization', ],
+    }
+
+    return dictionary
+
+
+# Returns a BOW represantation of an array of strings
+def text_to_BOW (X, X_test, min_df = 1, max_df = 1.0):
+    '''
+    :return: X_BOW: BOW representation of the X_train data; X_test_BOW: BOW representation of the X_test data
+    '''
+    from sklearn.feature_extraction.text import CountVectorizer
+
+    vectorizer = CountVectorizer (min_df = min_df, max_df = max_df)
+
+    bow_vocab = vectorizer.fit (X.ravel())
+
+    print ("bow_vocab len:", len (bow_vocab.get_feature_names()))
+
+    X_BOW = bow_vocab.transform (X.ravel())
+
+    X_test_BOW = bow_vocab.transform (X_test.ravel())
+
+    return X_BOW, X_test_BOW
+
+
+# Returns a BOW-tf-idf represantation of an array of strings
+def text_to_BOW_tfidf (X, X_test, min_df=1, max_df=1.0, min_gram=1, max_gram=1):
+    '''
+    :return: X_BOW: BOW representation of the X_train data; X_test_BOW: BOW representation of the X_test data
+    '''
+    from sklearn.feature_extraction.text import TfidfVectorizer
+
+    vect = TfidfVectorizer()
+
+    # include 1-grams and 2-grams
+    vect.set_params (ngram_range = (min_gram, max_gram))
+
+    # ignore terms that appear in more than 50% of the documents
+    vect.set_params(min_df=min_df, max_df=max_df)
+
+    vectorizer = vect.fit([sen for sen in X])
+
+    X_BOW = vectorizer.transform([sen for sen in X])
+
+    X_test_BOW = vectorizer.transform([sen for sen in X_test])
+
+    return X_BOW, X_test_BOW
+
+
+# Load the previously saved data
+
+df = pd.read_csv ("desired df")
+
+# Designate a list of the complex EHR semi-structured fields. The data is stored as concatenated strings
+
+BOW_list = ["past_stories_BOW", "flowsheet_BOW", "CCS_BOW", "CCS lvl 1_BOW", "CCS lvl 2_BOW", "ChiefComplaintKey_BOW",
+            "template_BOW", "template_only_BOW", "result_only_BOW", "labs_only_BOW"]
+
+# Concat all text fields into one text field
+
+df ["phy_nurse"] = df [["ED Attending_Text", "ED Disposition Decision_Text",
+                           "ED Procedure_Text", "ED Progress Notes_Text",
+                       "ED Provider Notes_Text", "H&P_Text",
+                       "ED Notes_Text", "ED Triage/Intake_Text"
+                       ]].apply (lambda row: " ".join ([x for x in list (row) if x==x]), axis = 1)
+
+# Add data of length of each included field
+
+for col in ["phy_nurse"] + BOW_list:
+    df [col + "_len"] = df [col].apply (lambda x: len (x.split ()) if x==x else 0)
+
+# Designate a list of all fully structured data fields
+
+all_cols = get_cols ()
+
+structured_input_cols = all_cols ["demographic_cols"] + all_cols ["triage_cols"] \
+                        + all_cols ["vital_signs_cols"] + all_cols ["background_cols"] + \
+                        all_cols ["time_dif_cols"] + all_cols ["NOTE_DATE_cols"]
+
+# Add the length cols to the structured data fields
+
+for col in ["phy_nurse"] + BOW_list:
+    structured_input_cols = structured_input_cols + [col + "_len"]
+
+unstructured_input_cols = ["phy_nurse"] + BOW_list
+
+structured_and_unstructured_input_cols = structured_input_cols  + unstructured_input_cols
+
+
+# Example of training a gradient boosting (XGboost) model using the BOW sparse represantation:
+
+# target is all cause in hospital mortality
+target = "is_mortality_hospital"
+
+# train data is years 2014-2017; test data is year 2018
+df_train = df [(df ["NOTE_DATE_year"]<2018) & (df ["NOTE_DATE_year"]>=2014)] [structured_and_unstructured_input_cols + [target]]
+df_test = df [(df ["NOTE_DATE_year"]>=2018)] [structured_and_unstructured_input_cols + [target]]
+
+y_train = df_train [target].values
+y_test = df_test [target].values
+
+X_BOW_list = []
+X_test_BOW_list = []
+# Create BOW representation of the unstructured fields
+for text_var in unstructured_input_cols:
+    print (text_var)
+    df_train [text_var].fillna (" ", inplace = True)
+    df_test [text_var].fillna (" ", inplace = True)
+    X_BOW_one, X_test_BOW_one = text_to_BOW (df_train [text_var].values, df_test [text_var].values, min_df=20, max_df=0.8)
+    X_BOW_list.append (X_BOW_one)
+    X_test_BOW_list.append (X_test_BOW_one)
+
+# Concat all the BOW representation into a sparse matrix
+from scipy.sparse import hstack
+X_BOW = hstack (X_BOW_list)
+X_test_BOW = hstack (X_test_BOW_list)
+
+from scipy import sparse
+
+# Get the structured fields in sparse form
+xgb_tab_X_train_sparse = sparse.csr_matrix (df_train [structured_input_cols].astype(float).values)
+
+xgb_tab_X_test_sparse = sparse.csr_matrix (df_test [structured_input_cols].astype(float).values)
+
+# concat the sparse structured and unstructured fields
+xgb_full_X_train_sparse = hstack ((xgb_tab_X_train_sparse, X_BOW))
+
+xgb_full_X_test_sparse = hstack((xgb_tab_X_test_sparse, X_test_BOW))
+
+
+# Train XGboost
+from xgboost import XGBClassifier
+
+estimators = 1000
+scale_weights=False
+if scale_weights: scale = (y_train.shape[0] - y_train.sum ()) / y_train.sum ()
+else: scale = 1
+
+params = {"n_estimators": estimators, "early_stopping_rounds":50, "eval_metric": "auc", "n_jobs": -1, "verbose_eval": True, "scale_pos_weight": scale, "verbosity":3,
+          }
+
+model = XGBClassifier(**params)
+
+model.fit (xgb_full_X_train_sparse, y_train)
+
+
+
+# Example of training a gradient boosting (XGboost) model using the BOW sparse represantation:
+
+# target is all cause in hospital mortality
+target = "is_mortality_hospital"
+
+# train data is years 2014-2017; test data is year 2018
+df_train = df [(df ["NOTE_DATE_year"]<2018) & (df ["NOTE_DATE_year"]>=2014)] [structured_and_unstructured_input_cols + [target]]
+df_test = df [(df ["NOTE_DATE_year"]>=2018)] [structured_and_unstructured_input_cols + [target]]
+
+y_train = df_train [target].values
+y_test = df_test [target].values
+
+# TF-IDF LR
+X_BOW_list = []
+X_test_BOW_list = []
+
+for var in unstructured_input_cols:
+    print (var)
+    X_BOW, X_test_BOW = text_to_BOW_tfidf (df_train [[var, target]],
+                                 df_test [[var, target]], var, target, 
+                                 min_df=1, max_df=1.0)
+    X_BOW_list.append (X_BOW)
+    X_test_BOW_list.append (X_test_BOW)
+
+
+from scipy.sparse import hstack
+
+lr_BOW_X_train_sparse = hstack (X_BOW_list)
+lr_BOW_X_test_sparse = hstack (X_test_BOW_list)
+
+from scipy import sparse
+
+lr_full_X_train_sparse = hstack ([lr_BOW_X_train_sparse, sparse.csr_matrix (df_train [structured_input_cols].astype(float).values)])
+lr_full_X_test_sparse = hstack ([lr_BOW_X_test_sparse, sparse.csr_matrix (df_test [structured_input_cols].astype(float).values)])
+
+from sklearn.linear_model import LogisticRegression
+
+clf = LogisticRegression (max_iter = 2000).fit (lr_full_X_train_sparse, y_train)
+
